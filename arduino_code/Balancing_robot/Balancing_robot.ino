@@ -150,6 +150,7 @@ void loop(){
       if(negative)position_target *= -1;
       position_control_enabled = true;
       position_diff_start = position_target - position_current;
+      odometer = 0;
       
       // clean up
       first_received_byte = 0x00;
@@ -160,13 +161,15 @@ void loop(){
   } else {
     serial_waiting_counter++;
   }
-  
-  position_current = odometer * motor_tick_length;
-  position_control_counter++;
-  if(position_control_counter % 25 == 0) {
-    Serial.print("position_current: "); Serial.print(position_current, 4);
-    Serial.print("\tpid_setpoint: "); Serial.println(pid_setpoint, 4);
+
+  if(position_control_enabled) {
+    position_current = odometer * motor_tick_length;
+    position_control_counter++; 
   }
+//  if(position_control_counter % 25 == 0) {
+//    Serial.print("position_current: "); Serial.print(position_current, 4);
+//    Serial.print("\tpid_setpoint: "); Serial.println(pid_setpoint, 4);
+//  }
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   //Angle calculations
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -214,7 +217,7 @@ void loop(){
 
   gyro_yaw_data_raw -= gyro_yaw_calibration_value;                          //Add the gyro calibration value
   //Uncomment the following line to make the compensation active
-  //angle_gyro -= gyro_yaw_data_raw * 0.0000003;                            //Compensate the gyro offset when the robot is rotating
+  angle_gyro -= gyro_yaw_data_raw * 0.0000003;                            //Compensate the gyro offset when the robot is rotating
 
   angle_gyro = angle_gyro * 0.9996 + angle_acc * 0.0004;                    //Correct the drift of the gyro angle with the accelerometer angle
 
