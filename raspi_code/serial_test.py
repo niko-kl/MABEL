@@ -16,24 +16,41 @@ negative_byte = 0b1000000000000000
 position_value_byte = 0b0100000000000000
 
 while True:
-    negative = False
-    input_number = int(input("input number: "))
-    if input_number < 0:
-        negative = True
-        input_number *= -1
-        input_number |= negative_byte
-    input_number |= position_value_byte
-    # print("modified number: ", input_number)
+    manual_driving = True
+    command = input("input: ")
+    if  command == 'l' or command == 'r':
+        manual_driving = True
+    else:
+        manual_driving = False
+    if not manual_driving:
+        input_number = int(command)
+        negative = False
+        if input_number < 0:
+            negative = True
+            input_number *= -1
+            input_number |= negative_byte
+        input_number |= position_value_byte
+        # print("modified number: ", input_number)
 
-    first = input_number >> 8
-    second = input_number & 255
+        first = input_number >> 8
+        second = input_number & 255
 
-    print("first number encoded: ", first)
-    print("second number encoded: ", second)
+        print("first number encoded: ", first)
+        print("second number encoded: ", second)
 
-    val = pack("B", first)
-    ser.write(val)
-    sleep(0.05)
-    val = pack("B", second)
-    ser.write(val)
-
+        val = pack("B", first)
+        ser.write(val)
+        sleep(0.05)
+        val = pack("B", second)
+        ser.write(val)
+    else:
+        sendByte = 0b00000000
+        if command == 'l':
+            sendByte |= 0b00000001
+            print("moving left")
+        if command == 'r':
+            sendByte |= 0b00000010
+            print("moving right")
+        val = pack("B", sendByte)
+        ser.write(val)
+        sleep(0.05)
