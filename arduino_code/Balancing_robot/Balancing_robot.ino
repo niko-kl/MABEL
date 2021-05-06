@@ -20,7 +20,7 @@ int acc_calibration_value = 1001
 float pid_p_gain = 8;                                       //Gain setting for the P-controller (15)
 float pid_i_gain = 1.2;                                      //Gain setting for the I-controller (1.5)
 float pid_d_gain = 30;                                       //Gain setting for the D-controller (30)
-float turning_speed = 20;                                    //Turning speed (20)
+float turning_speed = 10;                                    //Turning speed (20)
 float max_target_speed = 150;                                //Max target speed (100)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -31,28 +31,31 @@ byte start, received_byte;
 int left_motor, throttle_left_motor, throttle_counter_left_motor, throttle_left_motor_memory;
 int right_motor, throttle_right_motor, throttle_counter_right_motor, throttle_right_motor_memory;
 int receive_counter;
-int gyro_pitch_data_raw, gyro_yaw_data_raw, accelerometer_data_raw;
+int gyro_pitch_data_raw, gyro_yaw_data_raw, accelerometer_data_raw, yaw;
 
 long gyro_yaw_calibration_value, gyro_pitch_calibration_value;
 
 unsigned long loop_timer;
 
-float angle_gyro, angle_acc, angle, self_balance_pid_setpoint;
+float angle_gyro, angle_acc, angle, self_balance_pid_setpoint, yaw_angle;
 float pid_error_temp, pid_i_mem, pid_setpoint, gyro_input, pid_output, pid_last_d_error;
 float pid_output_left, pid_output_right;
 
-float motor_tick_length = 0.03125; // => formula: (1/800) * 25 <= // 800 possible wheel positions; 25cm for a full wheel circumference
-int odometer, odometer_dir = 1;
-int position_target;
-float position_current;
-bool position_control_enabled = false;
-unsigned long position_control_counter;
-byte control_byte;
-float position_diff_start;
+float motor_single_tick_length = (1.0/800.0) * (M_PI*0.08); // 0.08 m for full revolution
+float wheels_distance = 0.16;
 
 bool serial_waiting_enabled = false;
 int serial_waiting_counter;
 byte first_received_byte = 0x00, second_received_byte = 0x00;
+
+int odometer_left, odometer_right, odometer_dir_left = 1, odometer_dir_right = 1;
+float position_target, position_current;
+float position_diff_start;
+unsigned long autonomous_driving_counter;
+float angle_current, angle_target;
+
+bool set_angle_enabled = false, set_position_enabled = false;
+byte control_byte;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Setup basic functions
@@ -128,47 +131,61 @@ void loop(){
     if(receive_counter <= 25)receive_counter ++;                              //The received byte will be valid for 25 program loops (100 milliseconds)
     else received_byte = 0x00;                                                //After 100 milliseconds the received byte is deleted
   
-  if(received_byte & B01000000 && first_received_byte == 0) {
+  if(received_byte & B01100000 && first_received_byte == 0) {
     serial_waiting_enabled = true;
     first_received_byte = received_byte;
     received_byte = 0x00;
   }
 
-  if(serial_waiting_enabled && serial_waiting_counter >= 50) { // waited 50 loops (200ms)
+  if(serial_waiting_enabled)serial_waiting_counter++;
+
+  if(serial_waiting_enabled && serial_waiting_counter >= 50) { // waiting 50 loops (200ms)
     bool negative = false;
-    bool skip = false;
-    if(Serial.available()) second_received_byte = Serial.read();
-    else skip = true;
-
-    if(!skip) {
-      if(first_received_byte & B10000000)negative = true;
-  
-      first_received_byte &= B00111111;
-      position_target = 0;
-      position_target = first_received_byte << 8 | second_received_byte;
-  
-      if(negative)position_target *= -1;
-      position_control_enabled = true;
-      position_diff_start = position_target - position_current;
-      odometer = 0;
-      
-      // clean up
-      first_received_byte = 0x00;
-      second_received_byte = 0x00;
-      serial_waiting_enabled = false;
-      serial_waiting_counter = 0;
+    bool skip = true;
+    if(Serial.available()) {
+      second_received_byte = Serial.read();
+      skip = false;
     }
-  } else {
-    serial_waiting_counter++;
+    if(!skip) {
+      if(first_received_byte & B00100000) { // received value is position
+        if(first_received_byte & B10000000)negative = true;
+        
+        first_received_byte &= B00011111;
+        int received_value = first_received_byte << 8 | second_received_byte;
+        
+        float received_angle = received_value;
+        if(negative)received_angle *= -1;
+
+        angle_target = angle_current + float(received_angle);
+        set_angle_enabled = true;
+      }
+      else if(first_received_byte & B01000000) { // received value is angle
+        if(first_received_byte & B10000000)negative = true;
+    
+        first_received_byte &= B00111111;
+        int received_value = first_received_byte << 8 | second_received_byte;
+        
+        float received_position = float(received_value) / 100.0;
+        if(negative)received_position *= -1;
+        
+        position_target = position_current + float(received_position);
+        set_position_enabled = true;
+      }
+        // clean up
+        first_received_byte = 0x00;
+        second_received_byte = 0x00;
+        serial_waiting_enabled = false;
+        serial_waiting_counter = 0;
+    }
   }
 
-  if(position_control_enabled) {
-    position_current = odometer * motor_tick_length;
-    position_control_counter++; 
-  }
-//  if(position_control_counter % 25 == 0) {
-//    Serial.print("position_current: "); Serial.print(position_current, 4);
-//    Serial.print("\tpid_setpoint: "); Serial.println(pid_setpoint, 4);
+  position_current = float((odometer_left + odometer_right) / 2) * motor_single_tick_length;
+  angle_current = ((((float(odometer_left) * motor_single_tick_length) - float(odometer_right) * motor_single_tick_length)) / wheels_distance) * (57296 / 1000);
+  autonomous_driving_counter++;
+
+//  if(autonomous_driving_counter % 50 == 0) {
+//    Serial.print("angle_current: "); Serial.println(angle_current, 4);
+//    Serial.print("position_current: "); Serial.println(position_current, 4);
 //  }
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   //Angle calculations
@@ -190,11 +207,13 @@ void loop(){
   if(start == 0 && angle_acc > -0.5&& angle_acc < 0.5){                     //If the accelerometer angle is almost 0
     angle_gyro = angle_acc;                                                 //Load the accelerometer angle in the angle_gyro variable
     start = 1;                                                              //Set the start variable to start the PID controller
-    position_current = 0;
-    odometer = 0;
-    position_control_enabled = false;
     position_target = 0;
-    position_control_counter = 0;
+    autonomous_driving_counter = 0;
+    angle_target = 0;
+    set_angle_enabled = false;
+    set_position_enabled = false;
+    odometer_left = 0;
+    odometer_right = 0;
   }
   
   Wire.beginTransmission(gyro_address);                                     //Start communication with the gyro
@@ -245,7 +264,7 @@ void loop(){
   if(angle_gyro > 30 || angle_gyro < -30 || start == 0){    //If the robot tips over or the start variable is zero or the battery is empty
     pid_output = 0;                                                         //Set the PID controller output to 0 so the motors stop moving
     pid_i_mem = 0;                                                          //Reset the I-controller memory
-    start = 0;                                                              //Set the start variable to 0
+    start = 0;                                                            //Set the start variable to 0
     self_balance_pid_setpoint = 0;                                          //Reset the self_balance_pid_setpoint variable
   }
 
@@ -259,7 +278,7 @@ void loop(){
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   //Autonomous Driving - Control calculations
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////  
-  if(position_control_enabled) {
+  if(set_position_enabled) {
     float position_diff_current = position_target - position_current;
     float pid_setpoint_control = 0.05;
     if (position_diff_current < 0 ) position_diff_current *= -1;
@@ -267,12 +286,10 @@ void loop(){
     else if (position_diff_current <=  0.5 * position_diff_start) pid_setpoint_control = 0.004;
     else if (position_diff_current > 0.5 * position_diff_start) pid_setpoint_control = 0.008;
 
-    if((position_control_counter % 1 == 0)) {
+    if((autonomous_driving_counter % 1 == 0)) {
       if (position_current < position_target - 0.1 * position_target) control_byte = B00000100;
       if (position_current > position_target + 0.1 * position_target) control_byte = B00001000;
-      else if (position_current >= position_target - 1 && position_current <= position_target + 1) position_control_enabled = false;
-//      Serial.print("position_current: "); Serial.print(position_current, 4);
-//      Serial.print("\tpid_setpoint: "); Serial.println(pid_setpoint, 4);
+      else if (position_current >= position_target - 2 && position_current <= position_target + 2) set_position_enabled = false;
     }
     
     if(control_byte & B00000100){                                            //If the third bit of the receive byte is set change the left and right variable to turn the robot to the right
@@ -289,21 +306,31 @@ void loop(){
       else if(pid_setpoint < -0.5)pid_setpoint += pid_setpoint_control * 10;                        //If the PID setpoint is smaller then -0.5 increase the setpoint with 0.05 every loop
       else pid_setpoint = 0;                                                  //If the PID setpoint is smaller then 0.5 or larger then -0.5 set the setpoint to 0
     }
-    
-    //The self balancing point is adjusted when there is not forward or backwards movement from the transmitter. This way the robot will always find it's balancing point
-    if(pid_setpoint == 0){                                                    //If the setpoint is zero degrees
-      if(pid_output < 0)self_balance_pid_setpoint += 0.0015;                  //Increase the self_balance_pid_setpoint if the robot is still moving forewards
-      if(pid_output > 0)self_balance_pid_setpoint -= 0.0015;                  //Decrease the self_balance_pid_setpoint if the robot is still moving backwards
-    }
 
     if(pid_setpoint >= 1.5) pid_setpoint = 1.5;
     if(pid_setpoint <= -1.5) pid_setpoint = -1.5;
+    
+  } else if(set_angle_enabled) {
+    if((autonomous_driving_counter % 25 == 0)) {
+      if (angle_current < angle_target - 0.1 * angle_target) control_byte = B00000001; // gegen UZS // negative Winkel
+      if (angle_current > angle_target + 0.1 * angle_target) control_byte = B00000010; // mit UZS // positive Winkel
+      else if (angle_current >= angle_target - 2 && angle_current <= angle_target + 2) set_angle_enabled = false;
+    }
+    
+    if(control_byte & B00000001){                                            //If the first bit of the receive byte is set change the left and right variable to turn the robot to the left
+      pid_output_left += turning_speed;                                       //Increase the left motor speed
+      pid_output_right -= turning_speed;                                      //Decrease the right motor speed
+    }
+    if(control_byte & B00000010){                                            //If the second bit of the receive byte is set change the left and right variable to turn the robot to the right
+      pid_output_left -= turning_speed;                                       //Decrease the left motor speed
+      pid_output_right += turning_speed;                                      //Increase the right motor speed
+    }
   }
 
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   //Manual Driving - Control calculations
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  if(!position_control_enabled) {
+  if(!set_position_enabled || !set_angle_enabled) {
     if(received_byte & B00000001){                                            //If the first bit of the receive byte is set change the left and right variable to turn the robot to the left
       pid_output_left += turning_speed;                                       //Increase the left motor speed
       pid_output_right -= turning_speed;                                      //Decrease the right motor speed
@@ -328,12 +355,14 @@ void loop(){
       else pid_setpoint = 0;                                                  //If the PID setpoint is smaller then 0.5 or larger then -0.5 set the setpoint to 0
     }
     
-    //The self balancing point is adjusted when there is not forward or backwards movement from the transmitter. This way the robot will always find it's balancing point
-    if(pid_setpoint == 0){                                                    //If the setpoint is zero degrees
-      if(pid_output < 0)self_balance_pid_setpoint += 0.0015;                  //Increase the self_balance_pid_setpoint if the robot is still moving forewards
-      if(pid_output > 0)self_balance_pid_setpoint -= 0.0015;                  //Decrease the self_balance_pid_setpoint if the robot is still moving backwards
-    }
   }
+  
+  //The self balancing point is adjusted when there is not forward or backwards movement from the transmitter. This way the robot will always find it's balancing point
+  if(pid_setpoint == 0){                                                    //If the setpoint is zero degrees
+    if(pid_output < 0)self_balance_pid_setpoint += 0.0015;                  //Increase the self_balance_pid_setpoint if the robot is still moving forewards
+    if(pid_output > 0)self_balance_pid_setpoint -= 0.0015;                  //Decrease the self_balance_pid_setpoint if the robot is still moving backwards
+  }
+  
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   //Motor pulse calculations
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -378,16 +407,16 @@ ISR(TIMER2_COMPA_vect){
     if(throttle_left_motor_memory < 0){                                     //If the throttle_left_motor_memory is negative
       PORTD &= 0b11011111;                                                  //Set output 3 low to reverse the direction of the stepper controller (5)
       throttle_left_motor_memory *= -1;                                     //Invert the throttle_left_motor_memory variable
-      odometer_dir = 1;
+      odometer_dir_left = 1;
     }
     else {
       PORTD |= 0b00100000;                                               //Set output 3 high for a forward direction of the stepper motor (5)
-      odometer_dir = -1;
+      odometer_dir_left = -1;
     }
   }
   else if(throttle_counter_left_motor == 1) {
     PORTD |= 0b00000100;             //Set output 2 high to create a pulse for the stepper controller
-    odometer += odometer_dir;
+    odometer_left += odometer_dir_left;
   }
   else if(throttle_counter_left_motor == 2)PORTD &= 0b11111011;             //Set output 2 low because the pulse only has to last for 20us 
   
@@ -399,9 +428,16 @@ ISR(TIMER2_COMPA_vect){
     if(throttle_right_motor_memory < 0){                                    //If the throttle_right_motor_memory is negative
       PORTD |= 0b01000000;                                                  //Set output 5 low to reverse the direction of the stepper controller 6 
       throttle_right_motor_memory *= -1;                                    //Invert the throttle_right_motor_memory variable
+      odometer_dir_right = 1;
     }
-    else PORTD &= 0b10111111;                                               //Set output 5 high for a forward direction of the stepper motor
+    else {
+      PORTD &= 0b10111111;                                               //Set output 5 high for a forward direction of the stepper motor
+      odometer_dir_right = -1;
+    }
   }
-  else if(throttle_counter_right_motor == 1)PORTD |= 0b00001000;            //Set output 4 high to create a pulse for the stepper controller
+  else if(throttle_counter_right_motor == 1) {
+    PORTD |= 0b00001000;            //Set output 4 high to create a pulse for the stepper controller
+    odometer_right += odometer_dir_right;
+  }
   else if(throttle_counter_right_motor == 2)PORTD &= 0b11110111;            //Set output 4 low because the pulse only has to last for 20us 3
 }
